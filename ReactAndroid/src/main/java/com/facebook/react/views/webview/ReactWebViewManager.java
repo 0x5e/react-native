@@ -28,6 +28,7 @@ import android.graphics.Bitmap;
 import android.graphics.Picture;
 import android.net.Uri;
 import android.os.Build;
+import android.os.ConditionVariable;
 import android.os.Environment;
 import android.provider.MediaStore;
 import android.text.TextUtils;
@@ -62,6 +63,7 @@ import com.facebook.react.uimanager.annotations.ReactProp;
 import com.facebook.react.uimanager.events.ContentSizeChangeEvent;
 import com.facebook.react.uimanager.events.Event;
 import com.facebook.react.uimanager.events.EventDispatcher;
+import com.facebook.react.views.webview.events.ShouldOverrideUrlLoadingEvent;
 import com.facebook.react.views.webview.events.TopLoadingErrorEvent;
 import com.facebook.react.views.webview.events.TopLoadingFinishEvent;
 import com.facebook.react.views.webview.events.TopLoadingStartEvent;
@@ -82,6 +84,7 @@ import org.json.JSONException;
  *  - topLoadingFinish
  *  - topLoadingStart
  *  - topLoadingError
+ *  - topShouldOverrideUrlLoading
  *
  * Each event will carry the following properties:
  *  - target - view's react tag
@@ -108,6 +111,7 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
   public static final int COMMAND_STOP_LOADING = 4;
   public static final int COMMAND_POST_MESSAGE = 5;
   public static final int COMMAND_INJECT_JAVASCRIPT = 6;
+  public static final int COMMAND_SHOULD_OVERRIDE_WITH_RESULT = 7;
 
   // Use `webView.loadUrl("about:blank")` to reliably reset the view
   // state and release page resources (including any running JavaScript).
@@ -152,33 +156,13 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
     }
 
     @Override
-    public boolean shouldOverrideUrlLoading(WebView view, String url) {
-        boolean useDefaultIntent = false;
-        if (mUrlPrefixesForDefaultIntent != null && mUrlPrefixesForDefaultIntent.size() > 0) {
-          ArrayList<Object> urlPrefixesForDefaultIntent =
-              mUrlPrefixesForDefaultIntent.toArrayList();
-          for (Object urlPrefix : urlPrefixesForDefaultIntent) {
-            if (url.startsWith((String) urlPrefix)) {
-              useDefaultIntent = true;
-              break;
-            }
-          }
-        }
-
-        if (!useDefaultIntent &&
-            (url.startsWith("http://") || url.startsWith("https://") ||
-            url.startsWith("file://") || url.equals("about:blank"))) {
-          return false;
-        } else {
-          try {
-            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            view.getContext().startActivity(intent);
-          } catch (ActivityNotFoundException e) {
-            FLog.w(ReactConstants.TAG, "activity not found to handle uri scheme for: " + url, e);
-          }
-          return true;
-        }
+    public boolean shouldOverrideUrlLoading(WebView webView, String url) {
+      ReactWebView reactWebView = ((ReactWebView)webView);
+      reactWebView.mShouldOverrideUrlLoadingResult = false;
+      dispatchEvent(webView, new ShouldOverrideUrlLoadingEvent(webView.getId(), createWebViewEvent(webView, url)));
+      reactWebView.mShouldOverrideUrlLoadingConditionVariable.close();
+      reactWebView.mShouldOverrideUrlLoadingConditionVariable.block(250);
+      return reactWebView.mShouldOverrideUrlLoadingResult;
     }
 
     @Override
@@ -238,6 +222,9 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
     protected boolean messagingEnabled = false;
     protected @Nullable ReactWebViewClient mReactWebViewClient;
 
+    protected ConditionVariable mShouldOverrideUrlLoadingConditionVariable;
+    protected boolean mShouldOverrideUrlLoadingResult;
+
     protected class ReactWebViewBridge {
       ReactWebView mContext;
 
@@ -260,6 +247,7 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
      */
     public ReactWebView(ThemedReactContext reactContext) {
       super(reactContext);
+      mShouldOverrideUrlLoadingConditionVariable = new ConditionVariable();
     }
 
     @Override
@@ -348,6 +336,11 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
     protected void cleanupCallbacksAndDestroy() {
       setWebViewClient(null);
       destroy();
+    }
+
+    private void shouldOverrideWithResult(ReadableArray args) {
+        this.mShouldOverrideUrlLoadingResult = args.getBoolean(0);
+        this.mShouldOverrideUrlLoadingConditionVariable.open();
     }
   }
 
@@ -670,7 +663,8 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
         "reload", COMMAND_RELOAD,
         "stopLoading", COMMAND_STOP_LOADING,
         "postMessage", COMMAND_POST_MESSAGE,
-        "injectJavaScript", COMMAND_INJECT_JAVASCRIPT
+        "injectJavaScript", COMMAND_INJECT_JAVASCRIPT,
+        "shouldOverrideWithResult", COMMAND_SHOULD_OVERRIDE_WITH_RESULT
       );
   }
 
@@ -710,6 +704,8 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
         break;
       case COMMAND_INJECT_JAVASCRIPT:
         root.loadUrl("javascript:" + args.getString(0));
+      case COMMAND_SHOULD_OVERRIDE_WITH_RESULT:
+        ((ReactWebView) root).shouldOverrideWithResult(args);
         break;
     }
   }
@@ -743,5 +739,12 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
     EventDispatcher eventDispatcher =
       reactContext.getNativeModule(UIManagerModule.class).getEventDispatcher();
     eventDispatcher.dispatchEvent(event);
+  }
+
+  @Override
+  public @Nullable Map getExportedCustomDirectEventTypeConstants() {
+    return MapBuilder.builder()
+      .put("topShouldOverrideUrlLoading", MapBuilder.of("registrationName", "onShouldOverrideUrlLoading"))
+      .build();
   }
 }

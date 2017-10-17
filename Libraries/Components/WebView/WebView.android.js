@@ -33,6 +33,8 @@ var WebViewState = keyMirror({
   ERROR: null,
 });
 
+type Event = Object;
+
 var defaultRenderLoading = () => (
   <View style={styles.loadingView}>
     <ActivityIndicator
@@ -58,6 +60,7 @@ class WebView extends React.Component {
     onNavigationStateChange: PropTypes.func,
     onMessage: PropTypes.func,
     onContentSizeChange: PropTypes.func,
+    onShouldStartLoadWithRequest: PropTypes.func,
     startInLoadingState: PropTypes.bool, // force WebView to show loadingView on first load
     style: ViewPropTypes.style,
 
@@ -260,6 +263,15 @@ class WebView extends React.Component {
       console.warn('WebView: `source.body` is not supported when using GET.');
     }
 
+    var onShouldOverrideUrlLoading = this.props.onShouldStartLoadWithRequest
+        && ((event: Event) => {
+            var shouldOverride = !this.props.onShouldStartLoadWithRequest(event.nativeEvent);
+            UIManager.dispatchViewManagerCommandSync(
+              this.getWebViewHandle(),
+              UIManager.RCTWebView.Commands.shouldOverrideWithResult,
+              [shouldOverride]);
+        });
+
     var webView =
       <RCTWebView
         ref={RCT_WEBVIEW_REF}
@@ -280,6 +292,7 @@ class WebView extends React.Component {
         onLoadingStart={this.onLoadingStart}
         onLoadingFinish={this.onLoadingFinish}
         onLoadingError={this.onLoadingError}
+        onShouldOverrideUrlLoading={onShouldOverrideUrlLoading}
         testID={this.props.testID}
         mediaPlaybackRequiresUserAction={this.props.mediaPlaybackRequiresUserAction}
         allowUniversalAccessFromFileURLs={this.props.allowUniversalAccessFromFileURLs}
