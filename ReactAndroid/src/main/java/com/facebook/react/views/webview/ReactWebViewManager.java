@@ -100,7 +100,7 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
   protected static final String REACT_CLASS = "RCTWebView";
 
   protected static final String HTML_ENCODING = "UTF-8";
-  protected static final String HTML_MIME_TYPE = "text/html; charset=utf-8";
+  protected static final String HTML_MIME_TYPE = "text/html";
   protected static final String BRIDGE_NAME = "__REACT_WEB_VIEW_BRIDGE";
 
   protected static final String HTTP_METHOD_POST = "POST";
@@ -704,6 +704,7 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
         break;
       case COMMAND_INJECT_JAVASCRIPT:
         root.loadUrl("javascript:" + args.getString(0));
+        break;
       case COMMAND_SHOULD_OVERRIDE_WITH_RESULT:
         ((ReactWebView) root).shouldOverrideWithResult(args);
         break;
