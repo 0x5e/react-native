@@ -705,6 +705,10 @@ public class NativeViewHierarchyManager {
     int commandId,
     @Nullable ReadableArray args) {
     UiThreadUtil.assertOnUiThread();
+    dispatchCommandCommon(reactTag, commandId, args);
+  }
+
+  public void dispatchCommandCommon(int reactTag, int commandId, @Nullable ReadableArray args) {
     View view = mTagsToViews.get(reactTag);
     if (view == null) {
       throw new IllegalViewOperationException("Trying to send command to a non-existing view " +
@@ -713,6 +717,10 @@ public class NativeViewHierarchyManager {
 
     ViewManager viewManager = resolveViewManager(reactTag);
     viewManager.receiveCommand(view, commandId, args);
+  }
+
+  public void dispatchCommandSync(int reactTag, int commandId, @Nullable ReadableArray args) {
+    dispatchCommandCommon(reactTag, commandId, args);
   }
 
   /**

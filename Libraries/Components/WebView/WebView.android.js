@@ -66,6 +66,7 @@ class WebView extends React.Component {
     onNavigationStateChange: PropTypes.func,
     onMessage: PropTypes.func,
     onContentSizeChange: PropTypes.func,
+    onShouldStartLoadWithRequest: PropTypes.func,
     startInLoadingState: PropTypes.bool, // force WebView to show loadingView on first load
     style: ViewPropTypes.style,
 
@@ -288,6 +289,15 @@ class WebView extends React.Component {
       console.warn('WebView: `source.body` is not supported when using GET.');
     }
 
+    var onShouldOverrideUrlLoading = this.props.onShouldStartLoadWithRequest
+        && ((event) => {
+            var shouldOverride = !this.props.onShouldStartLoadWithRequest(event.nativeEvent);
+            UIManager.dispatchViewManagerCommandSync(
+              this.getWebViewHandle(),
+              UIManager.RCTWebView.Commands.shouldOverrideWithResult,
+              [shouldOverride]);
+        });
+
     const nativeConfig = this.props.nativeConfig || {};
 
     let NativeWebView = nativeConfig.component || RCTWebView;
@@ -312,6 +322,7 @@ class WebView extends React.Component {
         onLoadingStart={this.onLoadingStart}
         onLoadingFinish={this.onLoadingFinish}
         onLoadingError={this.onLoadingError}
+        onShouldOverrideUrlLoading={onShouldOverrideUrlLoading}
         testID={this.props.testID}
         mediaPlaybackRequiresUserAction={this.props.mediaPlaybackRequiresUserAction}
         allowUniversalAccessFromFileURLs={this.props.allowUniversalAccessFromFileURLs}

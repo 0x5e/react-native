@@ -11,18 +11,26 @@ package com.facebook.react.views.webview;
 
 import javax.annotation.Nullable;
 
+import java.io.File;
+import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 
+import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Picture;
 import android.net.Uri;
 import android.os.Build;
+import android.os.ConditionVariable;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.text.TextUtils;
 import android.view.ViewGroup.LayoutParams;
 import android.webkit.ConsoleMessage;
@@ -36,6 +44,7 @@ import android.webkit.WebSettings;
 import android.webkit.CookieManager;
 
 import com.facebook.common.logging.FLog;
+import com.facebook.react.bridge.ActivityEventListener;
 import com.facebook.react.common.ReactConstants;
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.LifecycleEventListener;
@@ -54,6 +63,7 @@ import com.facebook.react.uimanager.annotations.ReactProp;
 import com.facebook.react.uimanager.events.ContentSizeChangeEvent;
 import com.facebook.react.uimanager.events.Event;
 import com.facebook.react.uimanager.events.EventDispatcher;
+import com.facebook.react.views.webview.events.ShouldOverrideUrlLoadingEvent;
 import com.facebook.react.views.webview.events.TopLoadingErrorEvent;
 import com.facebook.react.views.webview.events.TopLoadingFinishEvent;
 import com.facebook.react.views.webview.events.TopLoadingStartEvent;
@@ -74,6 +84,7 @@ import org.json.JSONException;
  *  - topLoadingFinish
  *  - topLoadingStart
  *  - topLoadingError
+ *  - topShouldOverrideUrlLoading
  *
  * Each event will carry the following properties:
  *  - target - view's react tag
@@ -100,6 +111,7 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
   public static final int COMMAND_STOP_LOADING = 4;
   public static final int COMMAND_POST_MESSAGE = 5;
   public static final int COMMAND_INJECT_JAVASCRIPT = 6;
+  public static final int COMMAND_SHOULD_OVERRIDE_WITH_RESULT = 7;
 
   // Use `webView.loadUrl("about:blank")` to reliably reset the view
   // state and release page resources (including any running JavaScript).
@@ -107,6 +119,12 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
 
   protected WebViewConfig mWebViewConfig;
   protected @Nullable WebView.PictureListener mPictureListener;
+
+  public static final int INPUT_FILE_REQUEST_CODE = 1001;
+  public static final String EXTRA_FROM_NOTIFICATION = "EXTRA_FROM_NOTIFICATION";
+
+  private ValueCallback<Uri[]> mFilePathCallback;
+  private String mCameraPhotoPath;
 
   protected static class ReactWebViewClient extends WebViewClient {
 
@@ -138,33 +156,13 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
     }
 
     @Override
-    public boolean shouldOverrideUrlLoading(WebView view, String url) {
-        boolean useDefaultIntent = false;
-        if (mUrlPrefixesForDefaultIntent != null && mUrlPrefixesForDefaultIntent.size() > 0) {
-          ArrayList<Object> urlPrefixesForDefaultIntent =
-              mUrlPrefixesForDefaultIntent.toArrayList();
-          for (Object urlPrefix : urlPrefixesForDefaultIntent) {
-            if (url.startsWith((String) urlPrefix)) {
-              useDefaultIntent = true;
-              break;
-            }
-          }
-        }
-
-        if (!useDefaultIntent &&
-            (url.startsWith("http://") || url.startsWith("https://") ||
-            url.startsWith("file://") || url.equals("about:blank"))) {
-          return false;
-        } else {
-          try {
-            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            view.getContext().startActivity(intent);
-          } catch (ActivityNotFoundException e) {
-            FLog.w(ReactConstants.TAG, "activity not found to handle uri scheme for: " + url, e);
-          }
-          return true;
-        }
+    public boolean shouldOverrideUrlLoading(WebView webView, String url) {
+      ReactWebView reactWebView = ((ReactWebView)webView);
+      reactWebView.mShouldOverrideUrlLoadingResult = false;
+      dispatchEvent(webView, new ShouldOverrideUrlLoadingEvent(webView.getId(), createWebViewEvent(webView, url)));
+      reactWebView.mShouldOverrideUrlLoadingConditionVariable.close();
+      reactWebView.mShouldOverrideUrlLoadingConditionVariable.block(250);
+      return reactWebView.mShouldOverrideUrlLoadingResult;
     }
 
     @Override
@@ -224,6 +222,9 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
     protected boolean messagingEnabled = false;
     protected @Nullable ReactWebViewClient mReactWebViewClient;
 
+    protected ConditionVariable mShouldOverrideUrlLoadingConditionVariable;
+    protected boolean mShouldOverrideUrlLoadingResult;
+
     protected class ReactWebViewBridge {
       ReactWebView mContext;
 
@@ -246,6 +247,7 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
      */
     public ReactWebView(ThemedReactContext reactContext) {
       super(reactContext);
+      mShouldOverrideUrlLoadingConditionVariable = new ConditionVariable();
     }
 
     @Override
@@ -335,6 +337,11 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
       setWebViewClient(null);
       destroy();
     }
+
+    private void shouldOverrideWithResult(ReadableArray args) {
+        this.mShouldOverrideUrlLoadingResult = args.getBoolean(0);
+        this.mShouldOverrideUrlLoadingConditionVariable.open();
+    }
   }
 
   public ReactWebViewManager() {
@@ -358,7 +365,7 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
   }
 
   @Override
-  protected WebView createViewInstance(ThemedReactContext reactContext) {
+  protected WebView createViewInstance(final ThemedReactContext reactContext) {
     ReactWebView webView = createReactWebViewInstance(reactContext);
     webView.setWebChromeClient(new WebChromeClient() {
       @Override
@@ -374,8 +381,110 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
       public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
         callback.invoke(origin, true, false);
       }
+
+      private File createImageFile() throws IOException {
+        // Create an image file name
+        String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+        String imageFileName = "JPEG_" + timeStamp + "_";
+        File storageDir = Environment.getExternalStoragePublicDirectory(
+          Environment.DIRECTORY_PICTURES);
+        File imageFile = new File(
+          storageDir,           /* directory */
+          imageFileName+".jpg"  /* filename */
+        );
+        return imageFile;
+      }
+
+      public boolean onShowFileChooser(
+        WebView webView,
+        ValueCallback<Uri[]> filePathCallback,
+        WebChromeClient.FileChooserParams fileChooserParams) {
+        if(mFilePathCallback != null) {
+          mFilePathCallback.onReceiveValue(null);
+        }
+        mFilePathCallback = filePathCallback;
+
+        Intent takePictureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        if (takePictureIntent.resolveActivity(reactContext.getCurrentActivity().getPackageManager()) != null) {
+          // Create the File where the photo should go
+          File photoFile = null;
+          try {
+            photoFile = createImageFile();
+            takePictureIntent.putExtra("PhotoPath", mCameraPhotoPath);
+          } catch (IOException ex) {
+            // Error occurred while creating the File
+            FLog.e(ReactConstants.TAG, "Unable to create Image File", ex);
+          }
+
+          // Continue only if the File was successfully created
+          if (photoFile != null) {
+            mCameraPhotoPath = "file:" + photoFile.getAbsolutePath();
+            takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT,
+              Uri.fromFile(photoFile));
+          } else {
+            takePictureIntent = null;
+          }
+        }
+
+        Intent contentSelectionIntent = new Intent(Intent.ACTION_GET_CONTENT);
+        contentSelectionIntent.addCategory(Intent.CATEGORY_OPENABLE);
+        contentSelectionIntent.setType("image/*");
+
+        Intent[] intentArray;
+        if(takePictureIntent != null) {
+          intentArray = new Intent[]{takePictureIntent};
+        } else {
+          intentArray = new Intent[0];
+        }
+
+        Intent chooserIntent = new Intent(Intent.ACTION_CHOOSER);
+        chooserIntent.putExtra(Intent.EXTRA_INTENT, contentSelectionIntent);
+        chooserIntent.putExtra(Intent.EXTRA_TITLE, "Image Chooser");
+        chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, intentArray);
+
+        reactContext.getCurrentActivity().startActivityForResult(chooserIntent, INPUT_FILE_REQUEST_CODE);
+
+        return true;
+      }
     });
+
     reactContext.addLifecycleEventListener(webView);
+    reactContext.addActivityEventListener(new ActivityEventListener() {
+      @Override
+      public void onActivityResult (Activity activity, int requestCode, int resultCode, Intent data) {
+        if(requestCode != INPUT_FILE_REQUEST_CODE || mFilePathCallback == null) {
+          return;
+        }
+        Uri[] results = null;
+
+        // Check that the response is a good one
+        if(resultCode == Activity.RESULT_OK) {
+          if(data == null) {
+            // If there is not data, then we may have taken a photo
+            if(mCameraPhotoPath != null) {
+              results = new Uri[]{Uri.parse(mCameraPhotoPath)};
+            }
+          } else {
+            String dataString = data.getDataString();
+            if (dataString != null) {
+              results = new Uri[]{Uri.parse(dataString)};
+            }
+          }
+        }
+
+        if(results == null) {
+          mFilePathCallback.onReceiveValue(new Uri[]{});
+        }
+        else {
+          mFilePathCallback.onReceiveValue(results);
+        }
+        mFilePathCallback = null;
+        return;
+      }
+
+      @Override
+      public void onNewIntent(Intent intent) {}
+    });
     mWebViewConfig.configWebView(webView);
     webView.getSettings().setBuiltInZoomControls(true);
     webView.getSettings().setDisplayZoomControls(false);
@@ -554,7 +663,8 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
         "reload", COMMAND_RELOAD,
         "stopLoading", COMMAND_STOP_LOADING,
         "postMessage", COMMAND_POST_MESSAGE,
-        "injectJavaScript", COMMAND_INJECT_JAVASCRIPT
+        "injectJavaScript", COMMAND_INJECT_JAVASCRIPT,
+        "shouldOverrideWithResult", COMMAND_SHOULD_OVERRIDE_WITH_RESULT
       );
   }
 
@@ -595,6 +705,9 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
       case COMMAND_INJECT_JAVASCRIPT:
         root.loadUrl("javascript:" + args.getString(0));
         break;
+      case COMMAND_SHOULD_OVERRIDE_WITH_RESULT:
+        ((ReactWebView) root).shouldOverrideWithResult(args);
+        break;
     }
   }
 
@@ -627,5 +740,12 @@ public class ReactWebViewManager extends SimpleViewManager<WebView> {
     EventDispatcher eventDispatcher =
       reactContext.getNativeModule(UIManagerModule.class).getEventDispatcher();
     eventDispatcher.dispatchEvent(event);
+  }
+
+  @Override
+  public @Nullable Map getExportedCustomDirectEventTypeConstants() {
+    return MapBuilder.builder()
+      .put("topShouldOverrideUrlLoading", MapBuilder.of("registrationName", "onShouldOverrideUrlLoading"))
+      .build();
   }
 }
